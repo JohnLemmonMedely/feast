@@ -1,10 +1,13 @@
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
+from pytz import utc
 
+from feast import Field
 from feast.entity import Entity
 from feast.feature_view import FeatureView
+from feast.types import Array, Bool, Float64, Int32, Int64, String, UnixTimestamp
 from tests.data.data_creator import create_basic_driver_dataset
 from tests.integration.feature_repos.integration_test_repo_config import (
     IntegrationTestRepoConfig,
@@ -24,8 +27,8 @@ SNOWFLAKE_ENGINE_CONFIG = {
     "password": os.getenv("SNOWFLAKE_CI_PASSWORD", ""),
     "role": os.getenv("SNOWFLAKE_CI_ROLE", ""),
     "warehouse": os.getenv("SNOWFLAKE_CI_WAREHOUSE", ""),
-    "database": "FEAST",
-    "schema": "MATERIALIZATION",
+    "database": os.getenv("SNOWFLAKE_CI_DATABASE", "FEAST"),
+    "schema": os.getenv("SNOWFLAKE_CI_SCHEMA_MATERIALIZATION", "MATERIALIZATION"),
 }
 
 SNOWFLAKE_ONLINE_CONFIG = {
@@ -35,8 +38,8 @@ SNOWFLAKE_ONLINE_CONFIG = {
     "password": os.getenv("SNOWFLAKE_CI_PASSWORD", ""),
     "role": os.getenv("SNOWFLAKE_CI_ROLE", ""),
     "warehouse": os.getenv("SNOWFLAKE_CI_WAREHOUSE", ""),
-    "database": "FEAST",
-    "schema": "ONLINE",
+    "database": os.getenv("SNOWFLAKE_CI_DATABASE", "FEAST"),
+    "schema": os.getenv("SNOWFLAKE_CI_SCHEMA_ONLINE", "ONLINE"),
 }
 
 
@@ -79,6 +82,120 @@ def test_snowflake_materialization_consistency_internal():
         print(f"Split datetime: {split_dt}")
 
         validate_offline_online_store_consistency(fs, driver_stats_fv, split_dt)
+    finally:
+        fs.teardown()
+        snowflake_environment.data_source_creator.teardown()
+
+
+@pytest.mark.parametrize(
+    "feature_dtype, feast_dtype, feature_is_empty_list, online_store",
+    [
+        ("string", Array(String), False, SNOWFLAKE_ONLINE_CONFIG),
+        ("int32", Array(Int32), False, SNOWFLAKE_ONLINE_CONFIG),
+        ("int64", Array(Int64), False, SNOWFLAKE_ONLINE_CONFIG),
+        ("float", Array(Float64), False, SNOWFLAKE_ONLINE_CONFIG),
+        ("bool", Array(Bool), False, SNOWFLAKE_ONLINE_CONFIG),
+        ("datetime", Array(UnixTimestamp), False, SNOWFLAKE_ONLINE_CONFIG),
+        ("string", Array(String), True, SNOWFLAKE_ONLINE_CONFIG),
+        ("int32", Array(Int32), True, SNOWFLAKE_ONLINE_CONFIG),
+        ("int64", Array(Int64), True, SNOWFLAKE_ONLINE_CONFIG),
+        ("float", Array(Float64), True, SNOWFLAKE_ONLINE_CONFIG),
+        ("bool", Array(Bool), True, SNOWFLAKE_ONLINE_CONFIG),
+        ("datetime", Array(UnixTimestamp), True, SNOWFLAKE_ONLINE_CONFIG),
+        ("string", Array(String), False, "sqlite"),
+        ("int32", Array(Int32), False, "sqlite"),
+        ("int64", Array(Int64), False, "sqlite"),
+        ("float", Array(Float64), False, "sqlite"),
+        ("bool", Array(Bool), False, "sqlite"),
+        ("datetime", Array(UnixTimestamp), False, "sqlite"),
+        ("string", Array(String), True, "sqlite"),
+        ("int32", Array(Int32), True, "sqlite"),
+        ("int64", Array(Int64), True, "sqlite"),
+        ("float", Array(Float64), True, "sqlite"),
+        ("bool", Array(Bool), True, "sqlite"),
+        ("datetime", Array(UnixTimestamp), True, "sqlite"),
+    ],
+)
+@pytest.mark.integration
+def test_snowflake_materialization_consistency_internal_with_lists(
+    feature_dtype, feast_dtype, feature_is_empty_list, online_store
+):
+    snowflake_config = IntegrationTestRepoConfig(
+        online_store=online_store,
+        offline_store_creator=SnowflakeDataSourceCreator,
+        batch_engine=SNOWFLAKE_ENGINE_CONFIG,
+    )
+    snowflake_environment = construct_test_environment(snowflake_config, None)
+
+    df = create_basic_driver_dataset(Int32, feature_dtype, True, feature_is_empty_list)
+    ds = snowflake_environment.data_source_creator.create_data_source(
+        df,
+        snowflake_environment.feature_store.project,
+        field_mapping={"ts_1": "ts"},
+    )
+
+    fs = snowflake_environment.feature_store
+    driver = Entity(
+        name="driver_id",
+        join_keys=["driver_id"],
+    )
+
+    schema = [
+        Field(name="driver_id", dtype=Int32),
+        Field(name="value", dtype=feast_dtype),
+    ]
+    driver_stats_fv = FeatureView(
+        name="driver_hourly_stats",
+        entities=[driver],
+        ttl=timedelta(weeks=52),
+        schema=schema,
+        source=ds,
+    )
+
+    try:
+        fs.apply([driver, driver_stats_fv])
+
+        split_dt = df["ts_1"][4].to_pydatetime() - timedelta(seconds=1)
+
+        print(f"Split datetime: {split_dt}")
+        now = datetime.utcnow()
+
+        full_feature_names = True
+        # TODO use both tz-naive & tz-aware timestamps to test that they're both correctly handled
+        start_date = (now - timedelta(hours=5)).replace(tzinfo=utc)
+        end_date = split_dt
+        fs.materialize(
+            feature_views=[driver_stats_fv.name],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        expected_values = {
+            "int32": [3] * 2,
+            "int64": [3] * 2,
+            "float": [3.0] * 2,
+            "string": ["3"] * 2,
+            "bool": [False] * 2,
+            "datetime": [datetime(1981, 1, 1, tzinfo=utc)] * 2,
+        }
+        expected_value = [] if feature_is_empty_list else expected_values[feature_dtype]
+
+        response_dict = fs.get_online_features(
+            [f"{driver_stats_fv.name}:value"],
+            [{"driver_id": 1}],
+            full_feature_names=full_feature_names,
+        ).to_dict()
+
+        actual_value = response_dict[f"{driver_stats_fv.name}__value"][0]
+        assert actual_value is not None, f"Response: {response_dict}"
+        if feature_dtype == "float":
+            for actual_num, expected_num in zip(actual_value, expected_value):
+                assert (
+                    abs(actual_num - expected_num) < 1e-6
+                ), f"Response: {response_dict}, Expected: {expected_value}"
+        else:
+            assert actual_value == expected_value
+
     finally:
         fs.teardown()
         snowflake_environment.data_source_creator.teardown()

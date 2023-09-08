@@ -279,12 +279,12 @@ class SnowflakeSource(DataSource):
                 else:
                     row["snowflake_type"] = "NUMBERwSCALE"
 
-            elif row["type_code"] in [5, 9, 10, 12]:
+            elif row["type_code"] in [9, 12]:
                 error = snowflake_unsupported_map[row["type_code"]]
                 raise NotImplementedError(
                     f"The following Snowflake Data Type is not supported: {error}"
                 )
-            elif row["type_code"] in [1, 2, 3, 4, 6, 7, 8, 11, 13]:
+            elif row["type_code"] in [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13]:
                 row["snowflake_type"] = snowflake_type_code_map[row["type_code"]]
             else:
                 raise NotImplementedError(
@@ -302,17 +302,17 @@ snowflake_type_code_map = {
     2: "VARCHAR",
     3: "DATE",
     4: "TIMESTAMP",
+    5: "VARIANT",
     6: "TIMESTAMP_LTZ",
     7: "TIMESTAMP_TZ",
     8: "TIMESTAMP_NTZ",
+    10: "ARRAY",
     11: "BINARY",
     13: "BOOLEAN",
 }
 
 snowflake_unsupported_map = {
-    5: "VARIANT -- Try converting to VARCHAR",
     9: "OBJECT -- Try converting to VARCHAR",
-    10: "ARRAY -- Try converting to VARCHAR",
     12: "TIME -- Try converting to VARCHAR",
 }
 
