@@ -465,7 +465,7 @@ class SnowflakeRetrievalJob(RetrievalJob):
                     Array(Float32),
                     Array(Bool),
                 ]:
-                    df[feature.name] = [json.loads(x) for x in df[feature.name]]
+                    df[feature.name] = [json.loads(x) if x else None for x in df[feature.name]]
 
         return df
 
