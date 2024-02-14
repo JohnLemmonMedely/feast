@@ -276,7 +276,9 @@ class SnowflakeMaterializationEngine(BatchMaterializationEngine):
 
             fv_latest_values_sql = offline_job.to_sql()
 
-            if feature_view.entity_columns[0].name == '__dummy_id':  # entityless Feature View
+            if (
+                feature_view.entity_columns[0].name == "__dummy_id"
+            ):  # entityless Feature View
                 entities_to_write = (
                     1  # entityless feature view has a placeholder entity
                 )
@@ -293,7 +295,6 @@ class SnowflakeMaterializationEngine(BatchMaterializationEngine):
 
                 with GetSnowflakeConnection(self.repo_config.offline_store) as conn:
                     entities_to_write = conn.cursor().execute(query).fetchall()[0][0]
-
 
             if feature_view.batch_source.field_mapping is not None:
                 fv_latest_mapped_values_sql = _run_snowflake_field_mapping(
